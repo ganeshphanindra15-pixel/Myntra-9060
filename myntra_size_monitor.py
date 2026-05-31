@@ -21,7 +21,7 @@ SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "YOUR_SCRAPERAPI_KEY")
 
 PRODUCT_ID             = "28873290"
 TARGET_SIZE            = "9"
-CHECK_INTERVAL_MINUTES = 20   # every 20 mins = ~2200 calls/month (within free tier)
+CHECK_INTERVAL_MINUTES = int(os.environ.get("CHECK_INTERVAL_MINUTES", "60"))
 # ──────────────────────────────────────────────────────────────────────────────
 
 PRODUCT_URL  = f"https://www.myntra.com/{PRODUCT_ID}"
@@ -44,12 +44,14 @@ def fetch_product_data():
         "api_key": SCRAPER_API_KEY,
         "url": MYNTRA_API,
         "render": "false",
-        "country_code": "in",          # Use Indian IP
+        "country_code": "in",
     }
     try:
-        log.info("Fetching via ScraperAPI...")
+        key_preview = SCRAPER_API_KEY[:6] + "..." if SCRAPER_API_KEY and len(SCRAPER_API_KEY) > 6 else "(empty!)"
+        log.info(f"Fetching via ScraperAPI... Key starts with: {key_preview}")
         r = requests.get(SCRAPER_URL, params=params, timeout=60)
         log.info(f"Status: {r.status_code} | Length: {len(r.text)}")
+        log.info(f"Response preview: {r.text[:300]}")
 
         if r.status_code == 200 and r.text.strip():
             try:
