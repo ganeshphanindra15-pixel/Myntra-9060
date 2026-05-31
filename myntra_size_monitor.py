@@ -1,13 +1,6 @@
 """
 Myntra Size Monitor - Telegram Bot
 Monitors product 28873290 for Size 9 availability and notifies via Telegram.
-
-Setup:
-1. pip install requests python-telegram-bot schedule
-2. Create a Telegram bot via @BotFather and get your BOT_TOKEN
-3. Get your CHAT_ID by messaging @userinfobot on Telegram
-4. Fill in BOT_TOKEN and CHAT_ID below
-5. Run: python myntra_size_monitor.py
 """
 
 import os
@@ -21,36 +14,95 @@ from datetime import datetime
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "YOUR_TELEGRAM_BOT_TOKEN")
 CHAT_ID   = os.environ.get("CHAT_ID", "YOUR_TELEGRAM_CHAT_ID")
 
-PRODUCT_ID    = "28873290"
-TARGET_SIZE   = "9"
-CHECK_INTERVAL_MINUTES = 10             # How often to check (in minutes)
+PRODUCT_ID             = "28873290"
+TARGET_SIZE            = "9"
+CHECK_INTERVAL_MINUTES = 10
 # ──────────────────────────────────────────────────────────────────────────────
 
-MYNTRA_API_URL = f"https://www.myntra.com/gateway/v2/product/{PRODUCT_ID}"
-PRODUCT_URL    = f"https://www.myntra.com/{PRODUCT_ID}"
+PRODUCT_URL = f"https://www.myntra.com/{PRODUCT_ID}"
+
+# Try multiple API endpoints — Myntra blocks some from cloud IPs
+API_ENDPOINTS = [
+    f"https://www.myntra.com/gateway/v2/product/{PRODUCT_ID}",
+    f"https://www.myntra.com/gateway/v1/product/{PRODUCT_ID}/inventory",
+    f"https://api.myntra.com/v2/catalog/products/{PRODUCT_ID}",
+]
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
-    handlers=[
-        logging.StreamHandler(),
-        logging.FileHandler("monitor.log"),
-    ]
+    handlers=[logging.StreamHandler()],
 )
 log = logging.getLogger(__name__)
 
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/json",
-    "Referer": "https://www.myntra.com/",
-}
+# Rotate through different User-Agent strings to avoid blocks
+USER_AGENTS = [
+    # Android app UA (least likely to be blocked)
+    "com.myntra.android/5.2.9 (Android 13; Samsung SM-G991B)",
+    # iOS app UA
+    "Myntra/5.2.9 CFNetwork/1492.0.1 Darwin/23.3.0",
+    # Desktop browser
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    # Mobile browser
+    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0 Mobile Safari/537.36",
+]
 
-# Track last notification state to avoid spamming
+_ua_index = 0
 _last_notified_available = None
+
+
+def get_headers():
+    """Rotate User-Agent on each call."""
+    global _ua_index
+    ua = USER_AGENTS[_ua_index % len(USER_AGENTS)]
+    _ua_index += 1
+    return {
+        "User-Agent": ua,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-IN,en;q=0.9",
+        "Referer": "https://www.myntra.com/",
+        "Origin": "https://www.myntra.com",
+        "x-myntraweb": "Yes",
+        "x-location-code": "560001",   # Bangalore pincode — helps with inventory
+    }
+
+
+def fetch_product_data():
+    """Try each API endpoint until one works."""
+    for url in API_ENDPOINTS:
+        try:
+            log.info(f"Trying endpoint: {url}")
+            r = requests.get(url, headers=get_headers(), timeout=20)
+            if r.status_code == 200:
+                log.info("Got a response!")
+                return r.json()
+            else:
+                log.warning(f"Status {r.status_code} from {url}")
+        except Exception as e:
+            log.warning(f"Failed {url}: {e}")
+    return None
+
+
+def parse_sizes(data):
+    """Extract sizes list from various Myntra response formats."""
+    if not data:
+        return [], "Unknown Product"
+
+    # Format 1: { "style": { "name": ..., "sizes": [...] } }
+    if "style" in data:
+        style = data["style"]
+        return style.get("sizes", []), style.get("name", "Product")
+
+    # Format 2: { "name": ..., "sizes": [...] }
+    if "sizes" in data:
+        return data["sizes"], data.get("name", "Product")
+
+    # Format 3: { "data": { ... } }
+    if "data" in data:
+        inner = data["data"]
+        return inner.get("sizes", []), inner.get("name", "Product")
+
+    return [], "Product"
 
 
 def send_telegram(message: str):
@@ -70,81 +122,53 @@ def send_telegram(message: str):
         log.error(f"Failed to send Telegram message: {e}")
 
 
-def fetch_product_data() -> dict | None:
-    """Fetch product details from Myntra's internal API."""
-    try:
-        r = requests.get(MYNTRA_API_URL, headers=HEADERS, timeout=15)
-        r.raise_for_status()
-        return r.json()
-    except requests.exceptions.HTTPError as e:
-        log.warning(f"HTTP error fetching product: {e}")
-    except Exception as e:
-        log.error(f"Error fetching product: {e}")
-    return None
-
-
 def check_size_availability():
-    """Main check: fetch product and look for size 9."""
     global _last_notified_available
 
-    log.info(f"Checking size {TARGET_SIZE} availability for product {PRODUCT_ID}...")
+    log.info(f"Checking size {TARGET_SIZE} for product {PRODUCT_ID}...")
     data = fetch_product_data()
 
     if not data:
-        log.warning("No data returned from Myntra API.")
+        log.warning("All endpoints failed — Myntra is blocking this IP. Will retry next interval.")
         return
 
-    try:
-        # Navigate Myntra's response structure
-        product = data.get("style", data)  # some endpoints wrap in 'style'
-        name    = product.get("name", "Product")
-        sizes   = product.get("sizes", [])
+    sizes, name = parse_sizes(data)
+    log.info(f"Product: {name} | Sizes found: {[s.get('label') for s in sizes]}")
 
-        # Each size entry looks like:
-        # { "label": "9", "available": true/false, "skuId": ... }
-        size_entry = None
-        for s in sizes:
-            label = str(s.get("label", "")).strip()
-            if label == TARGET_SIZE:
-                size_entry = s
-                break
+    size_entry = next((s for s in sizes if str(s.get("label", "")).strip() == TARGET_SIZE), None)
 
-        if size_entry is None:
-            log.info(f"Size {TARGET_SIZE} not listed for this product.")
-            if _last_notified_available is not False:
-                send_telegram(
-                    f"⚠️ <b>Size {TARGET_SIZE} not found</b> in the size chart for:\n"
-                    f"<b>{name}</b>\n{PRODUCT_URL}\n\n"
-                    f"It may not be offered in this size."
-                )
-                _last_notified_available = False
-            return
-
-        is_available = size_entry.get("available", False)
-        log.info(f"Size {TARGET_SIZE} available: {is_available}")
-
-        if is_available and _last_notified_available is not True:
+    if size_entry is None:
+        log.info(f"Size {TARGET_SIZE} not listed.")
+        if _last_notified_available is not False:
             send_telegram(
-                f"✅ <b>Size {TARGET_SIZE} is NOW AVAILABLE!</b>\n\n"
-                f"👟 <b>{name}</b>\n"
-                f"🛒 <a href='{PRODUCT_URL}'>Buy now on Myntra</a>\n\n"
-                f"⏰ Checked at: {datetime.now().strftime('%d %b %Y, %I:%M %p')}"
-            )
-            _last_notified_available = True
-
-        elif not is_available and _last_notified_available is True:
-            send_telegram(
-                f"❌ <b>Size {TARGET_SIZE} is no longer available</b>\n\n"
-                f"👟 <b>{name}</b>\n"
-                f"🔔 I'll keep watching and notify you when it's back!"
+                f"⚠️ <b>Size {TARGET_SIZE} not found</b> in size chart\n"
+                f"<b>{name}</b>\n{PRODUCT_URL}\n\n"
+                f"It may not be offered in this size yet."
             )
             _last_notified_available = False
+        return
 
-        else:
-            log.info("No state change — skipping notification.")
+    is_available = size_entry.get("available", False)
+    log.info(f"Size {TARGET_SIZE} available: {is_available}")
 
-    except Exception as e:
-        log.error(f"Error parsing product data: {e}")
+    if is_available and _last_notified_available is not True:
+        send_telegram(
+            f"✅ <b>Size {TARGET_SIZE} is NOW AVAILABLE!</b>\n\n"
+            f"👟 <b>{name}</b>\n"
+            f"🛒 <a href='{PRODUCT_URL}'>Buy now on Myntra</a>\n\n"
+            f"⏰ {datetime.now().strftime('%d %b %Y, %I:%M %p')}"
+        )
+        _last_notified_available = True
+
+    elif not is_available and _last_notified_available is True:
+        send_telegram(
+            f"❌ <b>Size {TARGET_SIZE} is no longer available</b>\n\n"
+            f"👟 <b>{name}</b>\n"
+            f"🔔 Watching for it to come back..."
+        )
+        _last_notified_available = False
+    else:
+        log.info("No state change — skipping notification.")
 
 
 def main():
@@ -155,10 +179,8 @@ def main():
     log.info(f"Interval: every {CHECK_INTERVAL_MINUTES} minutes")
     log.info("=" * 50)
 
-    # Run once immediately on start
     check_size_availability()
 
-    # Schedule recurring checks
     schedule.every(CHECK_INTERVAL_MINUTES).minutes.do(check_size_availability)
 
     while True:
