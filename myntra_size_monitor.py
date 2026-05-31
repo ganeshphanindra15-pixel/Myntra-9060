@@ -1,7 +1,6 @@
 """
 Myntra Size Monitor - Telegram Bot
-Uses Myntra's mobile app API with rotating headers to check size availability.
-No paid proxy needed.
+Monitors product 28873290 for Size 9 availability and notifies via Telegram.
 """
 
 import os
@@ -21,7 +20,7 @@ TARGET_SIZE            = "9"
 CHECK_INTERVAL_MINUTES = int(os.environ.get("CHECK_INTERVAL_MINUTES", "60"))
 # ──────────────────────────────────────────────────────────────────────────────
 
-PRODUCT_URL = f"https://www.myntra.com/{PRODUCT_ID}"
+PRODUCT_URL = "https://www.myntra.com/28873290"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,7 +31,6 @@ log = logging.getLogger(__name__)
 
 _last_notified_available = None
 
-# Myntra Android app device fingerprints
 DEVICES = [
     {
         "User-Agent": "MyApp/5.3.2 (Linux; Android 13; SM-G991B Build/TP1A.220624.014)",
@@ -65,29 +63,27 @@ def get_headers():
         "Connection": "keep-alive",
     }
 
-
 def fetch_via_api(session):
-    """Try Myntra's product API endpoints."""
     endpoints = [
-        f"https://www.myntra.com/gateway/v2/product/{PRODUCT_ID}",
-        f"https://www.myntra.com/gateway/v2/product/{PRODUCT_ID}/sizechart",
+        "https://www.myntra.com/gateway/v2/product/28873290",
+        "https://www.myntra.com/gateway/v2/product/28873290/sizechart",
     ]
     for url in endpoints:
         try:
             r = session.get(url, headers=get_headers(), timeout=20)
-            log.info(f"[{url.split('/')[-1]}] Status: {r.status_code} | Length: {len(r.text)}")
-            if r.status_code == 200 and r.text.strip().startswith("{"):
+            log.info("Status: " + str(r.status_code) + " | Length: " + str(len(r.text)))
+            if r.status_code == 200 and r.text.strip().startswith("{") and len(r.text) > 1000:
                 return r.json()
+            elif r.status_code == 200 and len(r.text) <= 1000:
+                log.warning("Response too small, retrying with delay...")
+                time.sleep(random.uniform(4.0, 8.0))
         except Exception as e:
-            log.warning(f"Endpoint failed: {e}")
+            log.warning("Endpoint failed: " + str(e))
     return None
 
-
 def fetch_product_data():
-    """Create a session, warm it up with a homepage visit, then fetch product."""
     session = requests.Session()
     try:
-        # Warm up: visit homepage first to get cookies (mimics real browser)
         log.info("Warming up session...")
         session.get(
             "https://www.myntra.com/",
@@ -98,12 +94,10 @@ def fetch_product_data():
             },
             timeout=15,
         )
-        time.sleep(random.uniform(1.5, 3.0))  # human-like delay
+        time.sleep(random.uniform(1.5, 3.0))
     except Exception as e:
-        log.warning(f"Warmup failed (continuing anyway): {e}")
-
+        log.warning("Warmup failed: " + str(e))
     return fetch_via_api(session)
-
 
 def parse_sizes(data):
     if not data:
@@ -112,89 +106,77 @@ def parse_sizes(data):
         obj = data.get(key, data) if key else data
         if isinstance(obj, dict) and "sizes" in obj:
             return obj["sizes"], obj.get("name", "Product")
-    return [], data.get("name", "Product")
+    return [], "Product"
 
-
-def send_telegram(message: str):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+def send_telegram(message):
+    url = "https://api.telegram.org/bot" + BOT_TOKEN + "/sendMessage"
     try:
         r = requests.post(url, json={
             "chat_id": CHAT_ID,
             "text": message,
-            "parse_mode": "HTML",
-            "disable_web_page_preview": False,
+            "disable_web_page_preview": True,
         }, timeout=10)
         r.raise_for_status()
         log.info("Telegram notification sent.")
     except Exception as e:
-        log.error(f"Telegram error: {e}")
-
+        log.error("Telegram error: " + str(e))
 
 def check_size_availability():
     global _last_notified_available
-
-    log.info(f"Checking size {TARGET_SIZE} for product {PRODUCT_ID}...")
+    log.info("Checking size 9 for product 28873290...")
     data = fetch_product_data()
-
     if not data:
-        log.warning("Could not fetch product data — will retry next interval.")
+        log.warning("Could not fetch product data, will retry next interval.")
         return
 
     sizes, name = parse_sizes(data)
-    log.info(f"Product: {name} | Sizes found: {[s.get('label') for s in sizes]}")
+    log.info("Sizes found: " + str([s.get("label") for s in sizes]))
 
-    size_entry = next(
-        (s for s in sizes if str(s.get("label", "")).strip() == TARGET_SIZE), None
-    )
+    size_entry = None
+    for s in sizes:
+        if str(s.get("label", "")).strip() == "9":
+            size_entry = s
+            break
 
     if size_entry is None:
-        log.info(f"Size {TARGET_SIZE} not listed.")
+        log.info("Size 9 not listed.")
         if _last_notified_available is not False:
-            send_telegram(
-                f"⚠️ <b>Size {TARGET_SIZE} not in size chart</b>\n"
-                f"<b>{name}</b>\n{PRODUCT_URL}"
-            )
+            send_telegram("Size 9 not found in size chart\nNew Balance Men Woven Design 9060 Sneakers\n" + PRODUCT_URL)
             _last_notified_available = False
         return
 
     is_available = size_entry.get("available", False)
-    log.info(f"Size {TARGET_SIZE} available: {is_available}")
+    log.info("Size 9 available: " + str(is_available))
 
     if is_available and _last_notified_available is not True:
-        send_telegram(
-            f"✅ <b>Size {TARGET_SIZE} is NOW AVAILABLE!</b>\n\n"
-            f"👟 <b>{name}</b>\n"
-            f"🛒 <a href='{PRODUCT_URL}'>Buy now on Myntra</a>\n\n"
-            f"⏰ {datetime.now().strftime('%d %b %Y, %I:%M %p')}"
+        msg = (
+            "Size 9 is NOW AVAILABLE!\n"
+            "New Balance Men Woven Design 9060 Sneakers\n"
+            "Buy now: " + PRODUCT_URL + "\n"
+            "Checked at: " + datetime.now().strftime("%d %b %Y %I:%M %p")
         )
+        log.info("Sending message: " + msg)
+        send_telegram(msg)
         _last_notified_available = True
 
     elif not is_available and _last_notified_available is True:
-        send_telegram(
-            f"❌ <b>Size {TARGET_SIZE} is no longer available</b>\n\n"
-            f"👟 <b>{name}</b>\n"
-            f"🔔 Watching for it to come back..."
-        )
+        send_telegram("Size 9 is no longer available\nWill notify when it is back!")
         _last_notified_available = False
     else:
-        log.info("No state change — skipping notification.")
-
+        log.info("No state change, skipping notification.")
 
 def main():
-    log.info("=" * 50)
+    log.info("==================================================")
     log.info("Myntra Size Monitor started")
-    log.info(f"Product : {PRODUCT_URL}")
-    log.info(f"Size    : {TARGET_SIZE}")
-    log.info(f"Interval: every {CHECK_INTERVAL_MINUTES} minutes")
-    log.info("=" * 50)
-
+    log.info("Product: " + PRODUCT_URL)
+    log.info("Size: 9")
+    log.info("Interval: every " + str(CHECK_INTERVAL_MINUTES) + " minutes")
+    log.info("==================================================")
     check_size_availability()
     schedule.every(CHECK_INTERVAL_MINUTES).minutes.do(check_size_availability)
-
     while True:
         schedule.run_pending()
         time.sleep(30)
-
 
 if __name__ == "__main__":
     main()
